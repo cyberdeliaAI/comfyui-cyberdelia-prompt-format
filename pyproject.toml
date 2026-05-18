@@ -12,4 +12,4 @@ Repository = "https://github.com/cyberdeliaAI/comfyui-cyberdelia-prompt-format"
 [tool.comfy]
 PublisherId = "cyberdelia"
 DisplayName = "Cyberdelia Prompt Format"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/cyberdeliaAI/comfyui-cyberdelia-prompt-format/main/assets/icon.png"
