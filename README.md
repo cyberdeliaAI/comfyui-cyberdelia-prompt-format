@@ -77,6 +77,9 @@ adult: \d+\s*(y\.?o\.?|[Yy]ear[s]? [Oo]ld)
 
 Each alternate on the right is matched as an **anchored regex** against each cleaned tag; if it matches, the tag is replaced by `main_tag` and considered a duplicate from then on.
 
+In the compact node widget, separate multiple alias rules with semicolons.
+Line breaks are still supported when aliases come from existing workflows or connected text inputs.
+
 ## Exclusions
 
 Comma-separated list of tags to protect from underscore replacement:
@@ -84,5 +87,13 @@ Comma-separated list of tags to protect from underscore replacement:
 ```
 score_9, score_8_up, score_7_up, masterpiece_v2
 ```
+
+Use `*` as a wildcard for tag families:
+
+```
+score_*
+```
+
+This protects tags like `score_1`, `score_8_up`, and `score_9`.
 
 Embedding filenames in your `embeddings/` folder are auto-detected and always protected.

@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-cyberdelia-prompt-format"
 description = "Prompt cleanup for ComfyUI — port of sd-webui-prompt-format. Dedupe tags, fix bracket/comma spacing, swap underscores. Button-driven, not realtime. By Cyberdelia AI Lab."
-version = "1.0.0"
+version = "1.0.1"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []

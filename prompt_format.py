@@ -10,9 +10,16 @@ a trailing comma per line.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import folder_paths  # type: ignore  # provided by ComfyUI at runtime
+
+
+@dataclass(frozen=True)
+class ProtectedNames:
+    exact: list[str]
+    wildcard_patterns: list[re.Pattern]
 
 
 # --------------------------------------------------------------------------
@@ -60,20 +67,30 @@ class PromptFormatter:
     # --- Underscore handling ---------------------------------------------
 
     @classmethod
-    def _rm_underscore(cls, text: str, protected: list[str]) -> str:
+    def _rm_underscore(cls, text: str, protected: ProtectedNames) -> str:
         """Replace underscores with spaces, but not inside protected names
         (embedding / textual-inversion filenames or user-excluded tags)."""
         if not text.strip():
             return ""
 
         # Swap protected names out for placeholders
-        for i, name in enumerate(protected):
+        placeholders: list[str] = []
+
+        for pattern in protected.wildcard_patterns:
+            def stash(match):
+                placeholders.append(match.group(0))
+                return cls._TI_TEMPLATE.format(len(placeholders) - 1)
+
+            text = pattern.sub(stash, text)
+
+        for name in protected.exact:
             if name and name in text:
-                text = text.replace(name, cls._TI_TEMPLATE.format(i))
+                placeholders.append(name)
+                text = text.replace(name, cls._TI_TEMPLATE.format(len(placeholders) - 1))
 
         text = text.replace("_", " ")
 
-        for i, name in enumerate(protected):
+        for i, name in enumerate(placeholders):
             text = text.replace(cls._TI_TEMPLATE.format(i), name)
 
         return text
@@ -161,7 +178,7 @@ class PromptFormatter:
         line: str,
         dedupe: bool,
         rm_underscore: bool,
-        protected: list[str],
+        protected: ProtectedNames,
         aliases: list[tuple[re.Pattern, str]],
     ) -> str:
         # 1) Strip LoRA/network syntax outright (ComfyUI handles those elsewhere)
@@ -217,7 +234,7 @@ class PromptFormatter:
         dedupe: bool,
         rm_underscore: bool,
         append_comma: bool,
-        protected: list[str],
+        protected: ProtectedNames,
         aliases: list[tuple[re.Pattern, str]],
     ) -> str:
         lines = text.split("\n")
@@ -273,7 +290,16 @@ def parse_aliases(raw: str) -> list[tuple[re.Pattern, str]]:
     if ":" not in raw:
         return aliases
 
-    for line in raw.splitlines():
+    # Accept both the original multi-line format and a compact one-line
+    # semicolon-separated format for the smaller aliases widget.
+    entries = [
+        part.strip()
+        for line in raw.splitlines()
+        for part in line.split(";")
+        if part.strip()
+    ]
+
+    for line in entries:
         if ":" not in line:
             continue
         tag, words = line.split(":", 1)
@@ -296,8 +322,21 @@ def parse_aliases(raw: str) -> list[tuple[re.Pattern, str]]:
 
 def parse_exclusions(raw: str) -> list[str]:
     """User-provided tags that should NOT have their underscores stripped
-    (e.g. score_9, score_8_up)."""
+    (e.g. score_9, score_8_up, score_*)."""
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def compile_wildcard_exclusion(raw: str) -> re.Pattern | None:
+    """Compile an exclusion with * wildcards to a tag-ish text matcher."""
+    if "*" not in raw:
+        return None
+
+    pieces = [re.escape(part) for part in raw.split("*")]
+    pattern = r"[A-Za-z0-9_:\-.]*".join(pieces)
+    try:
+        return re.compile(rf"(?<![A-Za-z0-9_:\-.]){pattern}(?![A-Za-z0-9_:\-.])")
+    except re.error:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -341,9 +380,9 @@ class PromptFormatNode:
                 "aliases": (
                     "STRING",
                     {
-                        "multiline": True,
+                        "multiline": False,
                         "default": "",
-                        "placeholder": "1girl: girl, woman, lady\nadult: \\d+\\s*(y\\.?o\\.?|[Yy]ear[s]? [Oo]ld)",
+                        "placeholder": "1girl: girl, woman, lady",
                     },
                 ),
             },
@@ -359,12 +398,22 @@ class PromptFormatNode:
     _embedding_cache: list[str] | None = None
 
     @classmethod
-    def _get_protected(cls, exclusions: str) -> list[str]:
+    def _get_protected(cls, exclusions: str) -> ProtectedNames:
         if cls._embedding_cache is None:
             cls._embedding_cache = get_embedding_names()
-        extras = parse_exclusions(exclusions)
+        extras: list[str] = []
+        wildcard_patterns: list[re.Pattern] = []
+
+        for exclusion in parse_exclusions(exclusions):
+            pattern = compile_wildcard_exclusion(exclusion)
+            if pattern is None:
+                extras.append(exclusion)
+            else:
+                wildcard_patterns.append(pattern)
+
         # Longest names first so "score_8_up" matches before "score".
-        return sorted(set(cls._embedding_cache + extras), key=len, reverse=True)
+        exact = sorted(set(cls._embedding_cache + extras), key=len, reverse=True)
+        return ProtectedNames(exact=exact, wildcard_patterns=wildcard_patterns)
 
     def format(
         self,
