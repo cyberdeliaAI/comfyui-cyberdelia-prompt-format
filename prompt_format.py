@@ -442,7 +442,7 @@ class PromptFormatEncodeNode:
     """Format a prompt AND encode it with a CLIP model in one step.
 
     Equivalent to chaining PromptFormat -> CLIPTextEncode.
-    Output is CONDITIONING, ready for a sampler.
+    Outputs CONDITIONING plus the cleaned prompt string.
     """
 
     @classmethod
@@ -451,8 +451,8 @@ class PromptFormatEncodeNode:
         base["required"] = {"clip": ("CLIP",), **base["required"]}
         return base
 
-    RETURN_TYPES = ("CONDITIONING",)
-    RETURN_NAMES = ("conditioning",)
+    RETURN_TYPES = ("CONDITIONING", "STRING")
+    RETURN_NAMES = ("conditioning", "prompt")
     FUNCTION = "encode"
     CATEGORY = "Cyberdelia/text"
 
@@ -473,7 +473,7 @@ class PromptFormatEncodeNode:
 
         tokens = clip.tokenize(cleaned)
         output = clip.encode_from_tokens_scheduled(tokens)
-        return (output,)
+        return (output, cleaned)
 
 
 # --------------------------------------------------------------------------

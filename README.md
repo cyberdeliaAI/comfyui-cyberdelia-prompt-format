@@ -35,7 +35,7 @@ Note how `the_legend_of_zelda:_breath_of_the_wild` becomes `the legend of zelda:
 ![The two Cyberdelia nodes: Prompt Format and Prompt Format + Encode](examples/example03.png)
 
 - **Prompt Format (Cyberdelia)** — string → string. Drop it between any text source and your text encoder.
-- **Prompt Format + Encode (Cyberdelia)** — string + CLIP → CONDITIONING. Combines formatting and CLIP encoding in one step.
+- **Prompt Format + Encode (Cyberdelia)** — string + CLIP → CONDITIONING + STRING. Combines formatting and CLIP encoding in one step, and also outputs the cleaned prompt.
 
 Both nodes format **automatically when the workflow executes** — no button to click. Use these when you want deterministic, reproducible output baked into your workflow, and when you need full control (exclusions, regex aliases).
 
