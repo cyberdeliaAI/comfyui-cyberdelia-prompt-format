@@ -1,0 +1,14 @@
+.gitattributes
+.github/workflows/publish.yml
+LICENSE
+README.md
+__init__.py
+assets/icon.png
+examples/Screenshotnew01.png
+examples/example01.png
+examples/example02.png
+examples/example03.png
+examples/example04.png
+prompt_format.py
+pyproject.toml
+web/prompt_format.js
