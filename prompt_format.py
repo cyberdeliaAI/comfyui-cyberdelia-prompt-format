@@ -102,21 +102,34 @@ class PromptFormatter:
     _RE_MULTISPACE = re.compile(r"\s+")
 
     @classmethod
-    def _dedupe(cls, tags: list[str], aliases: list[tuple[re.Pattern, str]], unique: set[str] | None = None) -> list[str]:
+    def _dedupe(
+        cls, 
+        tags: list[str], 
+        aliases: list[tuple[re.Pattern, str]], 
+        unique: set[str] | None = None,
+        placeholders: list[str] | None = None
+    ) -> list[str]:
         if unique is None:
             unique = set()
-        out: list[str] = []
+        out = []
 
         for tag in tags:
-            cleaned = cls._RE_BRACKETS.sub("", tag)
-            cleaned = cls._RE_MULTISPACE.sub(" ", cleaned).strip()
+            raw_cleaned = cls._RE_BRACKETS.sub("", tag)
+            
+            actual_tag = raw_cleaned
+            is_stashed = False
+            if placeholders:
+                actual_tag = cls._restore_exclusions(raw_cleaned, placeholders)
+                if actual_tag != raw_cleaned:
+                    is_stashed = True
 
-            # Keep prompt-control keywords (AND, BREAK) as-is, always.
+            cleaned = cls._RE_MULTISPACE.sub(" ", actual_tag).strip()
+
             if cls._RE_KEYWORD.match(cleaned):
                 out.append(tag)
                 continue
 
-            # Pure numbers (e.g. weights) pass through.
+            # Pure numbers pass through.
             try:
                 float(cleaned)
                 out.append(tag)
@@ -124,19 +137,32 @@ class PromptFormatter:
             except ValueError:
                 pass
 
+            # Extract weight suffix if present (e.g. "dog girl:1.2")
+            weight = ""
+            if ":" in cleaned:
+                parts = cleaned.split(":")
+                try:
+                    float(parts[-1])
+                    weight = ":" + parts[-1]
+                    cleaned = ":".join(parts[:-1]).strip()
+                except ValueError:
+                    pass
+
             # Alias lookup: if tag matches a pattern, substitute with main tag
             substitute: str | None = None
-            for pattern, main_tag in aliases:
-                if pattern.match(cleaned):
-                    substitute = main_tag
-                    break
+            if not is_stashed:
+                for pattern, main_tag in aliases:
+                    if pattern.match(cleaned):
+                        substitute = main_tag
+                        break
 
             if substitute is None:
-                if cleaned not in unique:
-                    unique.add(cleaned)
+                full_cleaned = f"{cleaned}{weight}"
+                if full_cleaned not in unique:
+                    unique.add(full_cleaned)
                     out.append(tag)
                 else:
-                    out.append(tag.replace(cleaned, ""))
+                    out.append(tag.replace(raw_cleaned, ""))
                 continue
 
             # Handle canonical substitutes that may contain multiple comma-separated tags
@@ -149,10 +175,12 @@ class PromptFormatter:
 
             if not new_subs:
                 # Entire substitute was already emitted, blank out the slot
-                out.append(tag.replace(cleaned, ""))
+                out.append(tag.replace(raw_cleaned, ""))
             else:
                 new_substitute = ", ".join(new_subs)
-                out.append(tag.replace(cleaned, new_substitute))
+                if weight:
+                    new_substitute = f"{new_substitute}{weight}"
+                out.append(tag.replace(raw_cleaned, new_substitute))
 
         return out
 
@@ -231,7 +259,7 @@ class PromptFormatter:
         # 10) Split into tags, dedupe, rejoin (now happening last)
         tags = [t.strip() for t in line.split(",")]
         if dedupe:
-            tags = cls._dedupe(tags, aliases, unique)
+            tags = cls._dedupe(tags, aliases, unique, placeholders)
 
         line = ", ".join(tags)
         line = cls._RE_MULTISPACE.sub(" ", line)
