@@ -131,20 +131,28 @@ class PromptFormatter:
                     substitute = main_tag
                     break
 
-            if substitute is None and cleaned not in unique:
-                unique.add(cleaned)
-                out.append(tag)
+            if substitute is None:
+                if cleaned not in unique:
+                    unique.add(cleaned)
+                    out.append(tag)
+                else:
+                    out.append(tag.replace(cleaned, ""))
                 continue
 
-            if substitute is not None and substitute not in unique:
-                unique.add(substitute)
-                out.append(tag.replace(cleaned, substitute))
-                continue
+            # Handle canonical substitutes that may contain multiple comma-separated tags
+            sub_tags = [s.strip() for s in substitute.split(",")]
+            new_subs = []
+            for s in sub_tags:
+                if s not in unique:
+                    unique.add(s)
+                    new_subs.append(s)
 
-            # Duplicate: blank out the content but keep the slot so brackets
-            # upstream still balance. The later "prune empty chunks" pass
-            # removes it.
-            out.append(tag.replace(cleaned, ""))
+            if not new_subs:
+                # Entire substitute was already emitted, blank out the slot
+                out.append(tag.replace(cleaned, ""))
+            else:
+                new_substitute = ", ".join(new_subs)
+                out.append(tag.replace(cleaned, new_substitute))
 
         return out
 
