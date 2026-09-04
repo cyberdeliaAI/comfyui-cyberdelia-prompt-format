@@ -1,5 +1,12 @@
 # comfyui-cyberdelia-prompt-format
 
+<p align="center">
+  <img src="assets/icon.png" alt="Cyberdelia Prompt Format icon" width="200">
+</p>
+
+[![Tests](https://github.com/cyberdeliaAI/comfyui-cyberdelia-prompt-format/actions/workflows/tests.yml/badge.svg)](https://github.com/cyberdeliaAI/comfyui-cyberdelia-prompt-format/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Prompt cleanup for ComfyUI.
 
 By **Cyberdelia AI Lab** · [github.com/cyberdeliaAI](https://github.com/cyberdeliaAI)
