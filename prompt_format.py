@@ -67,13 +67,11 @@ class PromptFormatter:
     # --- Underscore handling ---------------------------------------------
 
     @classmethod
-    def _rm_underscore(cls, text: str, protected: ProtectedNames) -> str:
-        """Replace underscores with spaces, but not inside protected names
-        (embedding / textual-inversion filenames or user-excluded tags)."""
+    def _stash_exclusions(cls, text: str, protected: ProtectedNames) -> tuple[str, list[str]]:
+        """Swap protected names out for placeholders so they survive processing."""
         if not text.strip():
-            return ""
+            return text, []
 
-        # Swap protected names out for placeholders
         placeholders: list[str] = []
 
         for pattern in protected.wildcard_patterns:
@@ -88,11 +86,13 @@ class PromptFormatter:
                 placeholders.append(name)
                 text = text.replace(name, cls._TI_TEMPLATE.format(len(placeholders) - 1))
 
-        text = text.replace("_", " ")
+        return text, placeholders
 
+    @classmethod
+    def _restore_exclusions(cls, text: str, placeholders: list[str]) -> str:
+        """Restore protected names from their placeholders."""
         for i, name in enumerate(placeholders):
             text = text.replace(cls._TI_TEMPLATE.format(i), name)
-
         return text
 
     # --- Deduplication ---------------------------------------------------
@@ -102,20 +102,34 @@ class PromptFormatter:
     _RE_MULTISPACE = re.compile(r"\s+")
 
     @classmethod
-    def _dedupe(cls, tags: list[str], aliases: list[tuple[re.Pattern, str]]) -> list[str]:
-        unique: set[str] = set()
-        out: list[str] = []
+    def _dedupe(
+        cls, 
+        tags: list[str], 
+        aliases: list[tuple[re.Pattern, str]], 
+        unique: set[str] | None = None,
+        placeholders: list[str] | None = None
+    ) -> list[str]:
+        if unique is None:
+            unique = set()
+        out = []
 
         for tag in tags:
-            cleaned = cls._RE_BRACKETS.sub("", tag)
-            cleaned = cls._RE_MULTISPACE.sub(" ", cleaned).strip()
+            raw_cleaned = cls._RE_BRACKETS.sub("", tag)
+            
+            actual_tag = raw_cleaned
+            is_stashed = False
+            if placeholders:
+                actual_tag = cls._restore_exclusions(raw_cleaned, placeholders)
+                if actual_tag != raw_cleaned:
+                    is_stashed = True
 
-            # Keep prompt-control keywords (AND, BREAK) as-is, always.
+            cleaned = cls._RE_MULTISPACE.sub(" ", actual_tag).strip()
+
             if cls._RE_KEYWORD.match(cleaned):
                 out.append(tag)
                 continue
 
-            # Pure numbers (e.g. weights) pass through.
+            # Pure numbers pass through.
             try:
                 float(cleaned)
                 out.append(tag)
@@ -123,27 +137,50 @@ class PromptFormatter:
             except ValueError:
                 pass
 
+            # Extract weight suffix if present (e.g. "dog girl:1.2")
+            weight = ""
+            if ":" in cleaned:
+                parts = cleaned.split(":")
+                try:
+                    float(parts[-1])
+                    weight = ":" + parts[-1]
+                    cleaned = ":".join(parts[:-1]).strip()
+                except ValueError:
+                    pass
+
             # Alias lookup: if tag matches a pattern, substitute with main tag
             substitute: str | None = None
-            for pattern, main_tag in aliases:
-                if pattern.match(cleaned):
-                    substitute = main_tag
-                    break
+            if not is_stashed:
+                for pattern, main_tag in aliases:
+                    if pattern.match(cleaned):
+                        substitute = main_tag
+                        break
 
-            if substitute is None and cleaned not in unique:
-                unique.add(cleaned)
-                out.append(tag)
+            if substitute is None:
+                full_cleaned = f"{cleaned}{weight}"
+                if full_cleaned not in unique:
+                    unique.add(full_cleaned)
+                    out.append(tag)
+                else:
+                    out.append(tag.replace(raw_cleaned, ""))
                 continue
 
-            if substitute is not None and substitute not in unique:
-                unique.add(substitute)
-                out.append(tag.replace(cleaned, substitute))
-                continue
+            # Handle canonical substitutes that may contain multiple comma-separated tags
+            sub_tags = [s.strip() for s in substitute.split(",")]
+            new_subs = []
+            for s in sub_tags:
+                if s not in unique:
+                    unique.add(s)
+                    new_subs.append(s)
 
-            # Duplicate: blank out the content but keep the slot so brackets
-            # upstream still balance. The later "prune empty chunks" pass
-            # removes it.
-            out.append(tag.replace(cleaned, ""))
+            if not new_subs:
+                # Entire substitute was already emitted, blank out the slot
+                out.append(tag.replace(raw_cleaned, ""))
+            else:
+                new_substitute = ", ".join(new_subs)
+                if weight:
+                    new_substitute = f"{new_substitute}{weight}"
+                out.append(tag.replace(raw_cleaned, new_substitute))
 
         return out
 
@@ -180,50 +217,75 @@ class PromptFormatter:
         rm_underscore: bool,
         protected: ProtectedNames,
         aliases: list[tuple[re.Pattern, str]],
+        exclude_matchers: list[re.Pattern],
+        unique: set[str] | None = None,
     ) -> str:
-        # 1) Strip LoRA/network syntax outright (ComfyUI handles those elsewhere)
+        # 0) Prune excluded tags at the beginning (before any processing)
+        for pattern in exclude_matchers:
+            line = pattern.sub("", line)
+
+        # 1) Protect exclusions at the beginning
+        line, placeholders = cls._stash_exclusions(line, protected)
+
+        # 2) Strip LoRA/network syntax outright (ComfyUI handles those elsewhere)
         line = cls._strip_networks(line)
 
-        # 2) Underscore replacement (with embedding name protection)
+        # 3) Underscore replacement (exclusions are safely stashed)
         if rm_underscore:
-            line = cls._rm_underscore(line, protected)
+            line = line.replace("_", " ")
 
-        # 3) Protect emoticons
+        # 4) Protect emoticons
         line = cls._protect_expressions(line)
 
-        # 4) Normalize commas around brackets
+        # 5) Normalize commas around brackets
         for pattern, repl in cls._RE_FIX_COMMAS:
             line = pattern.sub(repl, line)
         for pattern, repl in cls._RE_FIX_SPACES:
             line = pattern.sub(repl, line)
 
-        # 5) Tighten pipe and colon syntax
+        # 6) Tighten pipe and colon syntax
         line = cls._RE_PIPE.sub("|", line)
         line = cls._RE_COLON.sub(":", line)
 
-        # 6) Split into tags, dedupe, rejoin
+        # 7) Franchise escape: \(series: name\) -> \(series: name\)  (space after colon)
+        line = cls._RE_FRANCHISE.sub(r"\\(\1: \2\\)", line)
+
+        # 8) Clean up stray empty-before-colon like ",:2"
+        line = cls._RE_COLON_CLEAN.sub(r":\1", line)
+
+        # 9) Restore protected emoticons
+        line = cls._restore_expressions(line)
+
+        # 10) Split into tags, dedupe, rejoin (now happening last)
         tags = [t.strip() for t in line.split(",")]
         if dedupe:
-            tags = cls._dedupe(tags, aliases)
+            tags = cls._dedupe(tags, aliases, unique, placeholders)
 
         line = ", ".join(tags)
         line = cls._RE_MULTISPACE.sub(" ", line)
 
-        # 7) Drop empty brackets iteratively
+        # 11) Drop empty brackets iteratively (must happen after dedupe)
         while cls._RE_EMPTY_BRACKET.search(line):
             line = cls._RE_EMPTY_BRACKET.sub("", line)
 
-        # 8) Franchise escape: \(series: name\) -> \(series: name\)  (space after colon)
-        line = cls._RE_FRANCHISE.sub(r"\\(\1: \2\\)", line)
-
-        # 9) Prune empty chunks
+        # 12) Prune empty chunks (must happen after drop empty brackets)
         line = ", ".join(t.strip() for t in line.split(",") if t.strip())
 
-        # 10) Clean up stray empty-before-colon like ",:2"
-        line = cls._RE_COLON_CLEAN.sub(r":\1", line)
+        # 13) Restore exclusions at the very end
+        line = cls._restore_exclusions(line, placeholders)
 
-        # 11) Restore protected emoticons
-        line = cls._restore_expressions(line)
+        # 14) Prune excluded tags again at the end
+        for pattern in exclude_matchers:
+            line = pattern.sub("", line)
+
+        # Clean up any mess left by the second pruning
+        for pattern, repl in cls._RE_FIX_COMMAS:
+            line = pattern.sub(repl, line)
+        for pattern, repl in cls._RE_FIX_SPACES:
+            line = pattern.sub(repl, line)
+        while cls._RE_EMPTY_BRACKET.search(line):
+            line = cls._RE_EMPTY_BRACKET.sub("", line)
+        line = ", ".join(t.strip() for t in line.split(",") if t.strip())
 
         return line
 
@@ -236,10 +298,12 @@ class PromptFormatter:
         append_comma: bool,
         protected: ProtectedNames,
         aliases: list[tuple[re.Pattern, str]],
+        exclude_matchers: list[re.Pattern],
     ) -> str:
         lines = text.split("\n")
+        unique: set[str] = set()
         formatted = [
-            cls.format_line(line, dedupe, rm_underscore, protected, aliases)
+            cls.format_line(line, dedupe, rm_underscore, protected, aliases, exclude_matchers, unique)
             for line in lines
         ]
 
@@ -320,9 +384,8 @@ def parse_aliases(raw: str) -> list[tuple[re.Pattern, str]]:
     return aliases
 
 
-def parse_exclusions(raw: str) -> list[str]:
-    """User-provided tags that should NOT have their underscores stripped
-    (e.g. score_9, score_8_up, score_*)."""
+def parse_list(raw: str) -> list[str]:
+    """Parse a comma-separated list of tags into a list of strings."""
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
@@ -337,6 +400,22 @@ def compile_wildcard_exclusion(raw: str) -> re.Pattern | None:
         return re.compile(rf"(?<![A-Za-z0-9_:\-.]){pattern}(?![A-Za-z0-9_:\-.])")
     except re.error:
         return None
+
+
+def compile_exclude_matchers(raw: str) -> list[re.Pattern]:
+    """Compile a comma-separated list of tags into regex patterns for pruning."""
+    matchers = []
+    for tag in parse_list(raw):
+        if "*" in tag:
+            pieces = [re.escape(part) for part in tag.split("*")]
+            pattern = r"[A-Za-z0-9_:\-.]*".join(pieces)
+        else:
+            pattern = re.escape(tag)
+        try:
+            matchers.append(re.compile(rf"(?<![A-Za-z0-9_:\-.]){pattern}(?![A-Za-z0-9_:\-.])"))
+        except re.error:
+            pass
+    return matchers
 
 
 # --------------------------------------------------------------------------
@@ -358,7 +437,7 @@ class PromptFormatNode:
                 "text": (
                     "STRING",
                     {
-                        "multiline": True,
+                        "multiline": False,
                         "dynamicPrompts": True,
                         "placeholder": "your prompt here...",
                         "default": "",
@@ -369,18 +448,26 @@ class PromptFormatNode:
                 "append_comma": ("BOOLEAN", {"default": True}),
             },
             "optional": {
-                "exclusions": (
+                "protect": (
                     "STRING",
                     {
-                        "multiline": False,
+                        "multiline": True,
                         "default": "",
                         "placeholder": "score_9, score_8_up, score_7_up",
+                    },
+                ),
+                "exclude": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "watermark, text, bad anatomy",
                     },
                 ),
                 "aliases": (
                     "STRING",
                     {
-                        "multiline": False,
+                        "multiline": True,
                         "default": "",
                         "placeholder": "1girl: girl, woman, lady",
                     },
@@ -398,16 +485,16 @@ class PromptFormatNode:
     _embedding_cache: list[str] | None = None
 
     @classmethod
-    def _get_protected(cls, exclusions: str) -> ProtectedNames:
+    def _get_protected(cls, protect: str) -> ProtectedNames:
         if cls._embedding_cache is None:
             cls._embedding_cache = get_embedding_names()
         extras: list[str] = []
         wildcard_patterns: list[re.Pattern] = []
 
-        for exclusion in parse_exclusions(exclusions):
-            pattern = compile_wildcard_exclusion(exclusion)
+        for p in parse_list(protect):
+            pattern = compile_wildcard_exclusion(p)
             if pattern is None:
-                extras.append(exclusion)
+                extras.append(p)
             else:
                 wildcard_patterns.append(pattern)
 
@@ -421,11 +508,13 @@ class PromptFormatNode:
         dedupe: bool,
         remove_underscores: bool,
         append_comma: bool,
-        exclusions: str = "",
+        protect: str = "",
+        exclude: str = "",
         aliases: str = "",
     ):
-        protected = self._get_protected(exclusions)
+        protected = self._get_protected(protect)
         alias_list = parse_aliases(aliases)
+        exclude_matchers = compile_exclude_matchers(exclude)
 
         cleaned = PromptFormatter.format_pipeline(
             text,
@@ -434,6 +523,7 @@ class PromptFormatNode:
             append_comma=append_comma,
             protected=protected,
             aliases=alias_list,
+            exclude_matchers=exclude_matchers,
         )
         return (cleaned,)
 
@@ -463,12 +553,13 @@ class PromptFormatEncodeNode:
         dedupe: bool,
         remove_underscores: bool,
         append_comma: bool,
-        exclusions: str = "",
+        protect: str = "",
+        exclude: str = "",
         aliases: str = "",
     ):
         formatter = PromptFormatNode()
         (cleaned,) = formatter.format(
-            text, dedupe, remove_underscores, append_comma, exclusions, aliases
+            text, dedupe, remove_underscores, append_comma, protect, exclude, aliases
         )
 
         tokens = clip.tokenize(cleaned)
@@ -498,11 +589,16 @@ try:
         dedupe = bool(data.get("dedupe", True))
         rm_underscore = bool(data.get("remove_underscores", True))
         append_comma = bool(data.get("append_comma", True))
-        exclusions = data.get("exclusions", "") or ""
+        protect = data.get("protect", "") or ""
+        # Support legacy "exclusions" property gracefully
+        if not protect and data.get("exclusions"):
+            protect = data.get("exclusions", "")
+        exclude = data.get("exclude", "") or ""
         aliases = data.get("aliases", "") or ""
 
-        protected = PromptFormatNode._get_protected(exclusions)
+        protected = PromptFormatNode._get_protected(protect)
         alias_list = parse_aliases(aliases)
+        exclude_matchers = compile_exclude_matchers(exclude)
 
         cleaned = PromptFormatter.format_pipeline(
             text,
@@ -511,6 +607,7 @@ try:
             append_comma=append_comma,
             protected=protected,
             aliases=alias_list,
+            exclude_matchers=exclude_matchers,
         )
         return web.json_response({"text": cleaned})
 
